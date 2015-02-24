@@ -1,7 +1,6 @@
 package aws
 
 import (
-	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -126,15 +125,17 @@ func resourceAwsInstance() *schema.Resource {
 				ForceNew: true,
 				Optional: true,
 			},
+
 			"tenancy": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 				ForceNew: true,
 			},
+
 			"tags": tagsSchema(),
 
-			"block_device": &schema.Schema{
+			"ebs_block_device": &schema.Schema{
 				Type:     schema.TypeSet,
 				Optional: true,
 				Computed: true,
@@ -143,12 +144,6 @@ func resourceAwsInstance() *schema.Resource {
 						"device_name": &schema.Schema{
 							Type:     schema.TypeString,
 							Required: true,
-							ForceNew: true,
-						},
-
-						"virtual_name": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
 							ForceNew: true,
 						},
 
@@ -188,15 +183,44 @@ func resourceAwsInstance() *schema.Resource {
 						},
 					},
 				},
-				Set: resourceAwsInstanceBlockDevicesHash,
+				Set: func(v interface{}) int {
+					m := v.(map[string]interface{})
+					return hashcode.String(m["device_name"].(string))
+				},
+			},
+
+			"ephemeral_block_device": &schema.Schema{
+				Type:     schema.TypeSet,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"device_name": &schema.Schema{
+							Type:     schema.TypeString,
+							Required: true,
+							ForceNew: true,
+						},
+
+						"virtual_name": &schema.Schema{
+							Type:     schema.TypeString,
+							Required: true,
+							ForceNew: true,
+						},
+					},
+				},
+				Set: func(v interface{}) int {
+					m := v.(map[string]interface{})
+					return hashcode.String(m["virtual_name"].(string))
+				},
 			},
 
 			"root_block_device": &schema.Schema{
-				// TODO: This is a list because we don't support singleton
-				//       sub-resources today. We'll enforce that the list only ever has
+				// TODO: This is a set because we don't support singleton
+				//       sub-resources today. We'll enforce that the set only ever has
 				//       length zero or one below. When TF gains support for
 				//       sub-resources this can be converted.
-				Type:     schema.TypeList,
+				Type:     schema.TypeSet,
 				Optional: true,
 				Computed: true,
 				Elem: &schema.Resource{
@@ -232,6 +256,10 @@ func resourceAwsInstance() *schema.Resource {
 							ForceNew: true,
 						},
 					},
+				},
+				Set: func(v interface{}) int {
+					m := v.(map[string]interface{})
+					return hashcode.String(m["device_name"].(string))
 				},
 			},
 		},
@@ -282,38 +310,52 @@ func resourceAwsInstanceCreate(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
-	blockDevices := make([]interface{}, 0)
+	blockDevices := make([]ec2.BlockDeviceMapping, 0)
 
-	if v := d.Get("block_device"); v != nil {
-		blockDevices = append(blockDevices, v.(*schema.Set).List()...)
+	if v, ok := d.GetOk("ebs_block_device"); ok {
+		vL := v.(*schema.Set).List()
+		for _, v := range vL {
+			bd := v.(map[string]interface{})
+			blockDevices = append(blockDevices, ec2.BlockDeviceMapping{
+				DeleteOnTermination: bd["delete_on_termination"].(bool),
+				DeviceName:          bd["device_name"].(string),
+				Encrypted:           bd["encrypted"].(bool),
+				SnapshotId:          bd["snapshot_id"].(string),
+				VolumeSize:          int64(bd["volume_size"].(int)),
+				VolumeType:          bd["volume_type"].(string),
+			})
+		}
 	}
 
-	if v := d.Get("root_block_device"); v != nil {
-		rootBlockDevices := v.([]interface{})
-		if len(rootBlockDevices) > 1 {
+	if v, ok := d.GetOk("ephemeral_block_device"); ok {
+		vL := v.(*schema.Set).List()
+		for _, v := range vL {
+			bd := v.(map[string]interface{})
+			blockDevices = append(blockDevices, ec2.BlockDeviceMapping{
+				DeviceName:  bd["device_name"].(string),
+				VirtualName: bd["virtual_name"].(string),
+			})
+		}
+	}
+
+	if v, ok := d.GetOk("root_block_device"); ok {
+		vL := v.(*schema.Set).List()
+		if len(vL) > 1 {
 			return fmt.Errorf("Cannot specify more than one root_block_device.")
 		}
-		blockDevices = append(blockDevices, rootBlockDevices...)
+		for _, v := range vL {
+			bd := v.(map[string]interface{})
+			blockDevices = append(blockDevices, ec2.BlockDeviceMapping{
+				DeleteOnTermination: bd["delete_on_termination"].(bool),
+				DeviceName:          bd["device_name"].(string),
+				VolumeSize:          int64(bd["volume_size"].(int)),
+				VolumeType:          bd["volume_type"].(string),
+			})
+		}
 	}
 
 	if len(blockDevices) > 0 {
-		runOpts.BlockDevices = make([]ec2.BlockDeviceMapping, len(blockDevices))
-		for i, v := range blockDevices {
-			bd := v.(map[string]interface{})
-			runOpts.BlockDevices[i].DeviceName = bd["device_name"].(string)
-			runOpts.BlockDevices[i].VolumeType = bd["volume_type"].(string)
-			runOpts.BlockDevices[i].VolumeSize = int64(bd["volume_size"].(int))
-			runOpts.BlockDevices[i].DeleteOnTermination = bd["delete_on_termination"].(bool)
-			if v, ok := bd["virtual_name"].(string); ok {
-				runOpts.BlockDevices[i].VirtualName = v
-			}
-			if v, ok := bd["snapshot_id"].(string); ok {
-				runOpts.BlockDevices[i].SnapshotId = v
-			}
-			if v, ok := bd["encrypted"].(bool); ok {
-				runOpts.BlockDevices[i].Encrypted = v
-			}
-		}
+		runOpts.BlockDevices = blockDevices
 	}
 
 	// Create the instance
@@ -438,49 +480,9 @@ func resourceAwsInstanceRead(d *schema.ResourceData, meta interface{}) error {
 	}
 	d.Set("security_groups", sgs)
 
-	blockDevices := make(map[string]ec2.BlockDevice)
-	for _, bd := range instance.BlockDevices {
-		blockDevices[bd.VolumeId] = bd
-	}
-
-	volIDs := make([]string, 0, len(blockDevices))
-	for volID := range blockDevices {
-		volIDs = append(volIDs, volID)
-	}
-
-	volResp, err := ec2conn.Volumes(volIDs, ec2.NewFilter())
-	if err != nil {
+	if err := readBlockDevices(d, instance, ec2conn); err != nil {
 		return err
 	}
-
-	nonRootBlockDevices := make([]map[string]interface{}, 0)
-	rootBlockDevice := make([]interface{}, 0, 1)
-	for _, vol := range volResp.Volumes {
-		volSize, err := strconv.Atoi(vol.Size)
-		if err != nil {
-			return err
-		}
-
-		blockDevice := make(map[string]interface{})
-		blockDevice["device_name"] = blockDevices[vol.VolumeId].DeviceName
-		blockDevice["volume_type"] = vol.VolumeType
-		blockDevice["volume_size"] = volSize
-		blockDevice["delete_on_termination"] =
-			blockDevices[vol.VolumeId].DeleteOnTermination
-
-		// If this is the root device, save it. We stop here since we
-		// can't put invalid keys into this map.
-		if blockDevice["device_name"] == instance.RootDeviceName {
-			rootBlockDevice = []interface{}{blockDevice}
-			continue
-		}
-
-		blockDevice["snapshot_id"] = vol.SnapshotId
-		blockDevice["encrypted"] = vol.Encrypted
-		nonRootBlockDevices = append(nonRootBlockDevices, blockDevice)
-	}
-	d.Set("block_device", nonRootBlockDevices)
-	d.Set("root_block_device", rootBlockDevice)
 
 	return nil
 }
@@ -567,11 +569,110 @@ func InstanceStateRefreshFunc(conn *ec2.EC2, instanceID string) resource.StateRe
 	}
 }
 
-func resourceAwsInstanceBlockDevicesHash(v interface{}) int {
-	var buf bytes.Buffer
-	m := v.(map[string]interface{})
-	buf.WriteString(fmt.Sprintf("%s-", m["device_name"].(string)))
-	buf.WriteString(fmt.Sprintf("%s-", m["virtual_name"].(string)))
-	buf.WriteString(fmt.Sprintf("%t-", m["delete_on_termination"].(bool)))
-	return hashcode.String(buf.String())
+func readBlockDevices(d *schema.ResourceData, instance *ec2.Instance, ec2conn *ec2.EC2) error {
+	ibds, err := readBlockDevicesFromInstance(instance, ec2conn)
+	if err != nil {
+		return err
+	}
+
+	d.Set("ebs_block_device", ibds["ebs"])
+	d.Set("root_block_device", []interface{}{ibds["root"]})
+	seenDeviceNames := ibds["seen"].(map[string]bool)
+
+	// If "ephemeral_block_device" is non-empty, either it was specified in the
+	// config, or it was populated by a prior run of the provider's Read function.
+	if _, ok := d.GetOk("ephemeral_block_device"); !ok {
+		if ebds, err := readEphemeralBlockDevicesFromAMI(instance.ImageId, ec2conn); err != nil {
+			// Ephemeral BDs from the AMI are not attached if their device name conflicts with another configure BD.
+			attachedEBDs := make([]map[string]interface{}, 0)
+			for _, ebd := range ebds {
+				if !seenDeviceNames[ebd["device_name"].(string)] {
+					attachedEBDs = append(attachedEBDs, ebd)
+				}
+			}
+			d.Set("ephemeral_block_device", attachedEBDs)
+		} else {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func readBlockDevicesFromInstance(instance *ec2.Instance, ec2conn *ec2.EC2) (map[string]interface{}, error) {
+	blockDevices := make(map[string]interface{})
+	blockDevices["ebs"] = make([]map[string]interface{}, 0)
+	blockDevices["ephemeral"] = make([]map[string]interface{}, 0)
+	blockDevices["root"] = nil
+	blockDevices["seen"] = make(map[string]bool)
+
+	instanceBlockDevices := make(map[string]ec2.BlockDevice)
+	for _, bd := range instance.BlockDevices {
+		instanceBlockDevices[bd.VolumeId] = bd
+	}
+
+	volIDs := make([]string, 0, len(instanceBlockDevices))
+	for volID := range instanceBlockDevices {
+		volIDs = append(volIDs, volID)
+	}
+
+	// Need to call DescribeVolumes to get volume_size and volume_type for each
+	// EBS block device
+	volResp, err := ec2conn.Volumes(volIDs, ec2.NewFilter())
+	if err != nil {
+		return nil, err
+	}
+
+	for _, vol := range volResp.Volumes {
+		instanceBd := instanceBlockDevices[vol.VolumeId]
+		bd := make(map[string]interface{})
+		volSize, err := strconv.Atoi(vol.Size)
+		if err != nil {
+			return nil, err
+		}
+
+		bd["delete_on_termination"] = instanceBd.DeleteOnTermination
+		bd["device_name"] = instanceBd.DeviceName
+		bd["volume_size"] = volSize
+		bd["volume_type"] = vol.VolumeType
+
+		if instanceBd.DeviceName == instance.RootDeviceName {
+			blockDevices["root"] = bd
+		} else {
+			bd["encrypted"] = vol.Encrypted
+			bd["snapshot_id"] = vol.SnapshotId
+
+			blockDevices["ebs"] = append(blockDevices["ebs"].([]map[string]interface{}), bd)
+		}
+		blockDevices["seen"].(map[string]bool)[instanceBd.DeviceName] = true
+	}
+
+	return blockDevices, nil
+}
+
+func readEphemeralBlockDevicesFromAMI(ami string, ec2conn *ec2.EC2) ([]map[string]interface{}, error) {
+	ephemeralBlockDevices := make([]map[string]interface{}, 0)
+
+	imgResp, err := ec2conn.Images([]string{ami}, ec2.NewFilter())
+	if err != nil {
+		return nil, err
+	}
+	if len(imgResp.Images) != 1 {
+		return nil, fmt.Errorf("Error: %#v, expected 1 image in response: %#v", ami, imgResp)
+	}
+
+	for _, amibd := range imgResp.Images[0].BlockDevices {
+		// The AMI's BlockDeviceMapping contains more than just ephemeral storage,
+		// but that's all we care about here.
+		if !strings.HasPrefix(amibd.VirtualName, "ephemeral") {
+			continue
+		}
+
+		ebd := make(map[string]interface{})
+		ebd["device_name"] = amibd.DeviceName
+		ebd["virtual_name"] = amibd.VirtualName
+		ephemeralBlockDevices = append(ephemeralBlockDevices, ebd)
+	}
+
+	return ephemeralBlockDevices, nil
 }

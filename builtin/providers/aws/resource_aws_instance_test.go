@@ -105,20 +105,25 @@ func TestAccAWSInstance_blockDevices(t *testing.T) {
 					resource.TestCheckResourceAttr(
 						"aws_instance.foo", "root_block_device.#", "1"),
 					resource.TestCheckResourceAttr(
-						"aws_instance.foo", "root_block_device.0.device_name", "/dev/sda1"),
+						"aws_instance.foo", "root_block_device.3018388612.device_name", "/dev/sda1"),
 					resource.TestCheckResourceAttr(
-						"aws_instance.foo", "root_block_device.0.volume_size", "11"),
-					// this one is important because it's the only root_block_device
-					// attribute that comes back from the API. so checking it verifies
-					// that we set state properly
+						"aws_instance.foo", "root_block_device.3018388612.volume_size", "11"),
 					resource.TestCheckResourceAttr(
-						"aws_instance.foo", "root_block_device.0.volume_type", "gp2"),
+						"aws_instance.foo", "root_block_device.3018388612.volume_type", "gp2"),
 					resource.TestCheckResourceAttr(
-						"aws_instance.foo", "block_device.#", "1"),
+						"aws_instance.foo", "ebs_block_device.#", "1"),
 					resource.TestCheckResourceAttr(
-						"aws_instance.foo", "block_device.172787947.device_name", "/dev/sdb"),
+						"aws_instance.foo", "ebs_block_device.418220885.device_name", "/dev/sdb"),
 					resource.TestCheckResourceAttr(
-						"aws_instance.foo", "block_device.172787947.volume_size", "9"),
+						"aws_instance.foo", "ebs_block_device.418220885.volume_size", "9"),
+					resource.TestCheckResourceAttr(
+						"aws_instance.foo", "ebs_block_device.418220885.volume_type", "standard"),
+					resource.TestCheckResourceAttr(
+						"aws_instance.foo", "ephemeral_block_device.#", "1"),
+					resource.TestCheckResourceAttr(
+						"aws_instance.foo", "ephemeral_block_device.2087552357.device_name", "/dev/sde"),
+					resource.TestCheckResourceAttr(
+						"aws_instance.foo", "ephemeral_block_device.2087552357.virtual_name", "ephemeral0"),
 					testCheck(),
 				),
 			},
@@ -382,14 +387,19 @@ resource "aws_instance" "foo" {
 	# us-west-2
 	ami = "ami-55a7ea65"
 	instance_type = "m1.small"
+
 	root_block_device {
 		device_name = "/dev/sda1"
 		volume_type = "gp2"
 		volume_size = 11
 	}
-	block_device {
+	ebs_block_device {
 		device_name = "/dev/sdb"
 		volume_size = 9
+	}
+	ephemeral_block_device {
+		device_name = "/dev/sde"
+		virtual_name = "ephemeral0"
 	}
 }
 `
