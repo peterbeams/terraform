@@ -575,8 +575,12 @@ func readBlockDevices(d *schema.ResourceData, instance *ec2.Instance, ec2conn *e
 		return err
 	}
 
-	d.Set("ebs_block_device", ibds["ebs"])
-	d.Set("root_block_device", []interface{}{ibds["root"]})
+	if err := d.Set("ebs_block_device", ibds["ebs"]); err != nil {
+		return err
+	}
+	if err := d.Set("root_block_device", []interface{}{ibds["root"]}); err != nil {
+		return err
+	}
 	seenDeviceNames := ibds["seen"].(map[string]bool)
 
 	// If "ephemeral_block_device" is non-empty, either it was specified in the
@@ -590,7 +594,9 @@ func readBlockDevices(d *schema.ResourceData, instance *ec2.Instance, ec2conn *e
 					attachedEBDs = append(attachedEBDs, ebd)
 				}
 			}
-			d.Set("ephemeral_block_device", attachedEBDs)
+			if err := d.Set("ephemeral_block_device", attachedEBDs); err != nil {
+				return err
+			}
 		} else {
 			return err
 		}
